@@ -15,6 +15,15 @@ ghcr.io/sammrai/bd2mkv name-chapters <folder>
 
 AACS keydb (週次) と MakeMKV beta key (日次) は実行時自動取得・キャッシュ。`./aacs/keydb.cfg` 配置で上書き可。強制更新: `bd2mkv update-keys`。Whisper モデルはイメージ同梱。
 
+`name-chapters` 事前準備:
+
+```
+encoded/<DISC>/
+├── <DISC>.mkv
+├── setlist.txt          # 1行1曲、# でコメント
+└── lyrics/<曲名>.txt    # 空白は _ に置換
+```
+
 ## Plex メタデータ
 
 `encoded/<DISC_NAME>/<DISC_NAME>.nfo`:
