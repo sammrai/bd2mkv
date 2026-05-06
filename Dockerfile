@@ -22,19 +22,29 @@ RUN curl -fsSL -o oss.tar.gz "https://www.makemkv.com/download/makemkv-oss-${MAK
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg ca-certificates curl unzip \
+        ffmpeg mkvtoolnix \
+        python3 python3-pip python3-venv \
+        ca-certificates curl unzip bsdmainutils \
         libssl3 libexpat1 zlib1g libavcodec59 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/usr/ /usr/
 
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+RUN python3 -m venv "$VIRTUAL_ENV" \
+ && pip install --no-cache-dir faster-whisper
+
 COPY bd2mkv /usr/local/bin/bd2mkv
+COPY lib/ /usr/local/lib/bd2mkv/
 RUN chmod +x /usr/local/bin/bd2mkv
 
 ENV KEYDB_CACHE=/var/cache/aacs/keydb.cfg \
-    BETAKEY_CACHE=/var/cache/makemkv/beta.key
+    BETAKEY_CACHE=/var/cache/makemkv/beta.key \
+    WHISPER_CACHE=/var/cache/whisper \
+    BD2MKV_LIB=/usr/local/lib/bd2mkv
 
-VOLUME ["/var/cache/aacs", "/var/cache/makemkv"]
+VOLUME ["/var/cache/aacs", "/var/cache/makemkv", "/var/cache/whisper"]
 WORKDIR /work
 ENTRYPOINT ["bd2mkv"]
 CMD ["all"]

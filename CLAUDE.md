@@ -33,7 +33,12 @@ docker run --rm -v "$(pwd):/work" ghcr.io/sammrai/bd2mkv encode output/<DISC_NAM
 
 ## チャプター自動命名 (オプション)
 
-`./name_chapters.sh <encoded_folder>` でセットリストと歌詞からチャプター名を自動付与。faster-whisperで音声を文字起こしし、4-gram Jaccardで曲を特定、`mkvpropedit` で書き戻す。
+```bash
+docker run --rm -v "$(pwd):/work" \
+  ghcr.io/sammrai/bd2mkv name-chapters encoded/<DISC_NAME>
+```
+
+セットリストと歌詞からチャプター名を自動付与。faster-whisper で音声を文字起こしし、4-gram Jaccard で曲を特定、`mkvpropedit` で書き戻す。
 
 事前準備:
 ```
@@ -42,6 +47,8 @@ encoded/<DISC_NAME>/
 ├── setlist.txt              # 1行1曲
 └── lyrics/<曲名>.txt        # 空白は _ に置換
 ```
+
+Whisperモデルは `/var/cache/whisper` にキャッシュされる(初回のみ medium ~1.5GB / large-v3 ~3GB ダウンロード)。
 
 ## Plexメタデータ作成
 

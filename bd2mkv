@@ -1,9 +1,10 @@
 #!/bin/bash
 # bd2mkv: Blu-ray rip + H.265 encode pipeline
 # Usage:
-#   bd2mkv              # rip + encode (default)
-#   bd2mkv rip          # rip only
+#   bd2mkv                          # rip + encode (default)
+#   bd2mkv rip                      # rip only
 #   bd2mkv encode <folder> [crf]
+#   bd2mkv name-chapters <folder>   # auto-name chapters from setlist + lyrics
 set -euo pipefail
 
 ensure_keydb() {
@@ -110,12 +111,71 @@ cmd_encode() {
     echo "Done: $out"
 }
 
+cmd_name_chapters() {
+    local folder="${1:?Usage: bd2mkv name-chapters <encoded_folder>}"
+    folder=$(realpath "$folder")
+    local name="$(basename "$folder")"
+    local mkv="$folder/$name.mkv"
+    local setlist="$folder/setlist.txt"
+    local lyrics="$folder/lyrics"
+    local work="$folder/.chapters_cache"
+    local lib="${BD2MKV_LIB:-/usr/local/lib/bd2mkv}"
+
+    [ -f "$mkv" ]      || { echo "Missing: $mkv"; exit 1; }
+    [ -f "$setlist" ]  || { echo "Missing: $setlist"; exit 1; }
+    [ -d "$lyrics" ]   || { echo "Missing lyrics dir: $lyrics"; exit 1; }
+
+    mkdir -p "$work/snippets" "$work/transcripts" "$WHISPER_CACHE"
+
+    echo "[1/5] reading chapter timeline"
+    ffprobe -v error -show_chapters -of csv=p=0 "$mkv" \
+        | awk -F, 'BEGIN{print "idx,start,end,duration"} {printf "%d,%s,%s,%.6f\n", NR, $4, $6, $6-$4}' \
+        > "$work/chapters.csv"
+
+    echo "[2/5] extracting audio snippets"
+    tail -n +2 "$work/chapters.csv" | while IFS=, read idx start end dur; do
+        local snippet_dur out
+        snippet_dur=$(awk -v d="$dur" 'BEGIN{print (d<90?d:90)}')
+        out="$work/snippets/ch$(printf '%02d' $idx).mp3"
+        [ -f "$out" ] && continue
+        ffmpeg -hide_banner -loglevel error \
+            -ss "$start" -t "$snippet_dur" -i "$mkv" \
+            -vn -ac 1 -ar 16000 -b:a 64k \
+            "$out"
+    done
+
+    echo "[3/5] transcribing (medium → large-v3 retry)"
+    INPUT_DIR="$work/snippets" \
+    OUTPUT_DIR="$work/transcripts" \
+    WHISPER_CACHE="$WHISPER_CACHE" \
+        python3 "$lib/transcribe.py"
+
+    echo "[4/5] matching transcripts to setlist"
+    python3 "$lib/match_chapters.py" \
+        --chapters    "$work/chapters.csv" \
+        --setlist     "$setlist" \
+        --lyrics      "$lyrics" \
+        --transcripts "$work/transcripts" \
+        --report      "$work/match_report.tsv" \
+        > "$work/assignment.tsv"
+    column -t -s $'\t' "$work/match_report.tsv" | head -40
+
+    echo "[5/5] applying chapter names"
+    python3 "$lib/build_chapters_xml.py" \
+        --chapters   "$work/chapters.csv" \
+        --assignment "$work/assignment.tsv" \
+        > "$folder/chapters.xml"
+    mkvpropedit "$mkv" --chapters "$folder/chapters.xml"
+    echo "Done: $folder/chapters.xml"
+}
+
 cmd="${1:-all}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
-    rip)    cmd_rip ;;
-    encode) cmd_encode "$@" ;;
-    all)    cmd_rip && cmd_encode ;;
-    -h|--help|help) sed -n '2,7p' "$0" | sed 's/^# \?//' ;;
+    rip)            cmd_rip ;;
+    encode)         cmd_encode "$@" ;;
+    name-chapters)  cmd_name_chapters "$@" ;;
+    all)            cmd_rip && cmd_encode ;;
+    -h|--help|help) sed -n '2,8p' "$0" | sed 's/^# \?//' ;;
     *) echo "Unknown command: $cmd"; exit 1 ;;
 esac

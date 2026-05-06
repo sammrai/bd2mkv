@@ -9,8 +9,9 @@ transcript across passes (pass 2 wins when it has more characters).
 """
 import json, os, glob, re
 
-CHAPTERS = "/w/chapters"
-OUT = "/w/transcripts"
+CHAPTERS = os.environ.get("INPUT_DIR", "/w/chapters")
+OUT = os.environ.get("OUTPUT_DIR", "/w/transcripts")
+CACHE = os.environ.get("WHISPER_CACHE", "/cache")
 os.makedirs(OUT, exist_ok=True)
 
 HALLUCINATION_MARKERS = [
@@ -46,7 +47,7 @@ def run_pass(model_name, snippets):
     from faster_whisper import WhisperModel
     print(f"loading {model_name} ...", flush=True)
     m = WhisperModel(model_name, device="cpu", compute_type="int8",
-                     download_root="/cache")
+                     download_root=CACHE)
     for path in snippets:
         name = os.path.splitext(os.path.basename(path))[0]
         out_path = f"{OUT}/{name}.json"
