@@ -35,16 +35,21 @@ ENV VIRTUAL_ENV=/opt/venv \
 RUN python3 -m venv "$VIRTUAL_ENV" \
  && pip install --no-cache-dir faster-whisper
 
+# Pre-download Whisper models (int8) so the image is self-contained
+ENV WHISPER_CACHE=/opt/whisper-models
+RUN python3 -c "from faster_whisper import WhisperModel; \
+    WhisperModel('medium',   device='cpu', compute_type='int8', download_root='${WHISPER_CACHE}'); \
+    WhisperModel('large-v3', device='cpu', compute_type='int8', download_root='${WHISPER_CACHE}')"
+
 COPY bd2mkv /usr/local/bin/bd2mkv
 COPY lib/ /usr/local/lib/bd2mkv/
 RUN chmod +x /usr/local/bin/bd2mkv
 
 ENV KEYDB_CACHE=/var/cache/aacs/keydb.cfg \
     BETAKEY_CACHE=/var/cache/makemkv/beta.key \
-    WHISPER_CACHE=/var/cache/whisper \
     BD2MKV_LIB=/usr/local/lib/bd2mkv
 
-VOLUME ["/var/cache/aacs", "/var/cache/makemkv", "/var/cache/whisper"]
+VOLUME ["/var/cache/aacs", "/var/cache/makemkv"]
 WORKDIR /work
 ENTRYPOINT ["bd2mkv"]
 CMD ["all"]

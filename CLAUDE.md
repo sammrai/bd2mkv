@@ -48,7 +48,7 @@ encoded/<DISC_NAME>/
 └── lyrics/<曲名>.txt        # 空白は _ に置換
 ```
 
-Whisperモデルは `/var/cache/whisper` にキャッシュされる(初回のみ medium ~1.5GB / large-v3 ~3GB ダウンロード)。
+Whisper モデル (medium / large-v3 int8) はイメージにバンドル済 (`/opt/whisper-models`)。実行時のダウンロードは不要。
 
 ## Plexメタデータ作成
 
