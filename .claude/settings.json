@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./rip.sh)",
+      "Bash(./rip.sh *)",
+      "Bash(./encode.sh *)",
+      "Bash(docker compose pull *)",
+      "Bash(docker compose up *)",
+      "Bash(docker compose restart *)",
+      "Bash(docker compose exec makemkv *)",
+      "Bash(docker exec makemkv *)",
+      "Bash(curl *)",
+      "Bash(unzip *)",
+      "Bash(awk *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(chmod *)",
+      "Bash(mkdir *)"
+    ]
+  }
+}

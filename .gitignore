@@ -9,5 +9,6 @@ samples/
 # Project-specific working data (chapters, transcripts, setlists)
 work/
 
-# Local agent state
-.claude/
+# Local agent state (commit shared settings, ignore personal)
+.claude/*
+!.claude/settings.json
