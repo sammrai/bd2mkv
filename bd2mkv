@@ -1,0 +1,121 @@
+#!/bin/bash
+# bd2mkv: Blu-ray rip + H.265 encode pipeline
+# Usage:
+#   bd2mkv              # rip + encode (default)
+#   bd2mkv rip          # rip only
+#   bd2mkv encode <folder> [crf]
+set -euo pipefail
+
+ensure_keydb() {
+    local target="${HOME}/.MakeMKV/KEYDB.cfg"
+    mkdir -p "$(dirname "$target")"
+    if [ -f /work/aacs/keydb.cfg ]; then
+        cp /work/aacs/keydb.cfg "$target"
+        return
+    fi
+    mkdir -p "$(dirname "$KEYDB_CACHE")"
+    if [ ! -s "$KEYDB_CACHE" ] || [ -z "$(find "$KEYDB_CACHE" -mtime -7 2>/dev/null)" ]; then
+        echo "Downloading latest keydb.cfg..."
+        curl -fsSL -o /tmp/keydb.zip "http://fvonline-db.bplaced.net/fv_download.php?lang=eng"
+        unzip -p /tmp/keydb.zip > "$KEYDB_CACHE"
+        rm /tmp/keydb.zip
+    fi
+    cp "$KEYDB_CACHE" "$target"
+}
+
+ensure_betakey() {
+    mkdir -p "$(dirname "$BETAKEY_CACHE")" "${HOME}/.MakeMKV"
+    if [ ! -s "$BETAKEY_CACHE" ] || [ -z "$(find "$BETAKEY_CACHE" -mtime -1 2>/dev/null)" ]; then
+        echo "Fetching MakeMKV beta key..."
+        local key
+        key=$(curl -fsSL "https://www.makemkv.com/forum/viewtopic.php?t=1053" \
+            | grep -oE 'T-[a-zA-Z0-9@_-]{60,}' | head -1 || true)
+        [ -n "$key" ] && echo "$key" > "$BETAKEY_CACHE"
+    fi
+    if [ -s "$BETAKEY_CACHE" ]; then
+        printf 'app_Key = "%s"\n' "$(cat "$BETAKEY_CACHE")" > "${HOME}/.MakeMKV/settings.conf"
+    fi
+}
+
+cmd_rip() {
+    ensure_keydb
+    ensure_betakey
+
+    echo "Reading disc..."
+    local info name titles out
+    info=$(makemkvcon -r info disc:0 2>&1)
+    name=$(echo "$info" | grep -E "^DRV:0," | sed 's/.*","\([^"]*\)",".*/\1/')
+    if [ -z "$name" ] || [ "$name" = "BD_ROM" ] || [ "$name" = "DVD_ROM" ]; then
+        name=$(echo "$info" | grep -E "^CINFO:2,0," | sed 's/CINFO:2,0,"//;s/"$//' || true)
+    fi
+    [ -z "$name" ] && name="disc_$(date +%Y%m%d_%H%M%S)"
+
+    out="/work/output/$name"
+    mkdir -p "$out"
+    echo "Disc: $name"
+
+    titles=$(echo "$info" | grep -E "^TINFO:[0-9]+," | sed 's/TINFO:\([0-9]*\),.*/\1/' | sort -nu)
+    [ -z "$titles" ] && { echo "No titles found on disc."; exit 1; }
+
+    for t in $titles; do
+        local pat
+        pat=$(printf "_t%02d.mkv" "$t")
+        if compgen -G "$out/*$pat" > /dev/null; then
+            echo "Skip title $t (already ripped)"
+            continue
+        fi
+        echo "=== Ripping title $t ==="
+        makemkvcon mkv "disc:0" "$t" "$out" --progress=-stdout
+    done
+
+    echo "$name" > /tmp/last-disc
+    echo "Done: $out"
+}
+
+cmd_encode() {
+    local input="${1:-}" crf="${2:-20}"
+    if [ -z "$input" ] && [ -f /tmp/last-disc ]; then
+        input="/work/output/$(cat /tmp/last-disc)"
+    fi
+    [ -z "$input" ] && { echo "Usage: bd2mkv encode <folder> [crf]"; exit 1; }
+    [ -d "$input" ] || { echo "Not a directory: $input"; exit 1; }
+
+    local name out main
+    name=$(basename "$input")
+    out="/work/encoded/$name"
+    mkdir -p "$out"
+    main=$(basename "$(ls -S "$input"/*.mkv 2>/dev/null | head -1)")
+
+    for f in "$input"/*.mkv; do
+        [ -f "$f" ] || continue
+        local fn target
+        fn=$(basename "$f")
+        if [ "$fn" = "$main" ]; then
+            target="$out/$name.mkv"
+        else
+            target="$out/${fn%.mkv}-scene.mkv"
+        fi
+        if [ -f "$target" ]; then
+            echo "Skip (exists): $(basename "$target")"
+            continue
+        fi
+        echo "Encoding $fn -> $(basename "$target")"
+        ffmpeg -hide_banner -loglevel error -stats -i "$f" \
+            -map 0:v -map 0:a -map 0:s? -map_chapters 0 \
+            -c:v libx265 -crf "$crf" -preset medium \
+            -c:a aac -b:a 320k \
+            -c:s copy \
+            "$target"
+    done
+    echo "Done: $out"
+}
+
+cmd="${1:-all}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    rip)    cmd_rip ;;
+    encode) cmd_encode "$@" ;;
+    all)    cmd_rip && cmd_encode ;;
+    -h|--help|help) sed -n '2,7p' "$0" | sed 's/^# \?//' ;;
+    *) echo "Unknown command: $cmd"; exit 1 ;;
+esac
