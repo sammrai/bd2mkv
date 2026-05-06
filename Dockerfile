@@ -49,7 +49,6 @@ ENV KEYDB_CACHE=/var/cache/aacs/keydb.cfg \
     BETAKEY_CACHE=/var/cache/makemkv/beta.key \
     BD2MKV_LIB=/usr/local/lib/bd2mkv
 
-VOLUME ["/var/cache/aacs", "/var/cache/makemkv"]
 WORKDIR /work
 ENTRYPOINT ["bd2mkv"]
 CMD ["all"]

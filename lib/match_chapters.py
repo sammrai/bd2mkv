@@ -40,6 +40,8 @@ MC_KEYWORDS = (
 HALLUCINATION_MARKERS = (
     "JR東日本", "Sound Hodori", "Subscribe", "おやすみなさい",
     "by H.", "サウンドゥ", "サブタイトル",
+    "作詞・作曲", "作詞作曲", "編曲・編曲", "歌詞・歌詞",
+    "Instagram",
 )
 
 
@@ -67,31 +69,37 @@ def strip_hallucinations(text: str) -> str:
     return out
 
 
-def looks_like_mc(text: str, best_song_score: float) -> bool:
-    """Decide whether this transcript is MC content.
+def looks_like_mc(text: str, best_song_score: float, strict: bool = False) -> bool:
+    """Decide whether a transcript is MC content.
 
-    Songs scoring above SONG_THRESHOLD are already anchored before we get here,
-    so a non-anchored chapter is at most a weak song match. We pick MC if the
-    transcript contains audience-direct phrasing or is too short to be a song.
-
-    An *instrumental* track shows up as no transcript / pure hallucination, so
-    we explicitly do not call those MC -- the caller will fall back to position
-    fill.
+    `strict=True` is used when the next position-fill slot has no lyrics (the
+    chapter could be a song we just don't have lyrics for) — in that case we
+    only call it MC when the audience-direct signal is unmistakable.
+    `strict=False` is the normal case where the next slot has lyrics, so a
+    mismatched lyric score with even one MC keyword is enough.
     """
     cleaned = strip_hallucinations(text or "").strip()
     body = re.sub(r"\s+", "", cleaned)
 
-    if not body:
-        # nothing real -> caller should treat as instrumental, not MC
+    if len(body) < 12:
+        # almost nothing real -> instrumental / silence, not MC
         return False
 
     mc_hits = sum(k in cleaned for k in MC_KEYWORDS)
+
+    if strict:
+        # only the strongest MC signals; song lyrics often share 1-2 keywords
+        if mc_hits >= 4:
+            return True
+        if mc_hits >= 2 and len(body) < 50:
+            return True
+        return False
+
+    if mc_hits >= 3:
+        return True
     if mc_hits >= 2:
         return True
     if mc_hits >= 1 and best_song_score < MC_KEYWORD_LOW_SCORE:
-        return True
-    if len(body) < 8 and best_song_score < 0.10:
-        # very brief utterance, no song match
         return True
     return False
 
@@ -112,11 +120,26 @@ def main():
             continue
         setlist.append(line)
 
+    def lyric_path(title: str) -> str | None:
+        # explicit instrumental marker -> no lyric match (let position-fill take it)
+        if re.search(r"\(\s*SE\s*\)\s*$", title, re.IGNORECASE):
+            return None
+        # exact slug first; otherwise strip parenthesised suffix like "(アンコール)"
+        cand = [slug(title)]
+        base = re.sub(r"\s*[\(\[].+?[\)\]]\s*$", "", title).strip()
+        if base and base != title:
+            cand.append(slug(base))
+        for c in cand:
+            p = os.path.join(args.lyrics, f"{c}.txt")
+            if os.path.isfile(p):
+                return p
+        return None
+
     lyrics: dict[int, str] = {}
     for i, title in enumerate(setlist):
-        path = os.path.join(args.lyrics, f"{slug(title)}.txt")
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
+        p = lyric_path(title)
+        if p:
+            with open(p, encoding="utf-8") as f:
                 lyrics[i] = f.read()
 
     chapters = list(csv.DictReader(open(args.chapters)))
@@ -128,31 +151,34 @@ def main():
             return ""
         return json.load(open(p)).get("text", "")
 
-    # 1. score
+    # 1. score (ties broken by earliest setlist position)
     scored: list[list[tuple[float, int]]] = []
     for row in chapters:
         idx = int(row["idx"])
         t = get_text(idx)
-        s = sorted(((score(t, lyr), i) for i, lyr in lyrics.items()), reverse=True)
+        s = [(score(t, lyr), i) for i, lyr in lyrics.items()]
+        s.sort(key=lambda x: (-x[0], x[1]))
         scored.append(s)
 
-    # 2. pick anchors with monotonic invariant
+    # 2. pick anchors with monotonic invariant.
+    # When the same lyric content appears at multiple setlist positions
+    # (encore reprises etc.) the chapter falls through to its next-best
+    # candidate if its top pick is already taken by a higher-scoring chapter.
     chapter_anchor: dict[int, int] = {}
     setlist_used: dict[int, tuple[int, float]] = {}
     for ch_pos, sc in enumerate(scored):
-        if not sc:
-            continue
-        best_score, best_i = sc[0]
-        if best_score < SONG_THRESHOLD:
-            continue
         ch_idx = int(chapters[ch_pos]["idx"])
-        if best_i in setlist_used:
-            other_ch, other_score = setlist_used[best_i]
-            if best_score <= other_score:
-                continue
-            chapter_anchor.pop(other_ch, None)
-        chapter_anchor[ch_idx] = best_i
-        setlist_used[best_i] = (ch_idx, best_score)
+        for cand_score, cand_i in sc:
+            if cand_score < SONG_THRESHOLD:
+                break
+            if cand_i in setlist_used:
+                other_ch, other_score = setlist_used[cand_i]
+                if cand_score <= other_score:
+                    continue
+                chapter_anchor.pop(other_ch, None)
+            chapter_anchor[ch_idx] = cand_i
+            setlist_used[cand_i] = (ch_idx, cand_score)
+            break
 
     # enforce monotonicity
     while True:
@@ -194,7 +220,10 @@ def main():
         if cursor >= ceiling:
             assignment[idx] = "MC"
             continue
-        if looks_like_mc(text, best):
+        # strict MC test when the candidate setlist slot has no lyrics file
+        # (lyric-less songs would otherwise lose to weak MC keyword overlap)
+        next_has_lyrics = cursor in lyrics
+        if looks_like_mc(text, best, strict=not next_has_lyrics):
             assignment[idx] = "MC"
             continue
         assignment[idx] = setlist[cursor]

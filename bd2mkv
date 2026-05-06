@@ -1,11 +1,18 @@
 #!/bin/bash
 # bd2mkv: Blu-ray rip + H.265 encode pipeline
+#
+# Pipeline (each step reads the previous step's output):
+#   [1] rip                    disc           -> ./output/<DISC>/title_t*.mkv
+#   [2] encode <folder> [crf]  ./output/<f>/* -> ./encoded/<f>/<f>.mkv (+ *-scene.mkv)
+#   [3] name-chapters <folder> ./encoded/<f>/<f>.mkv  (in-place; uses mkvpropedit)
+#       requires: ./encoded/<f>/setlist.txt; lyrics auto-fetched from j-lyric
+#                 if `# @artist NAME` is on setlist.txt or `lyrics/` is pre-filled
+#
 # Usage:
-#   bd2mkv                          # rip + encode (default)
-#   bd2mkv rip                      # rip only
-#   bd2mkv encode <folder> [crf]
-#   bd2mkv name-chapters <folder>   # auto-name chapters from setlist + lyrics
-#   bd2mkv update-keys              # force refresh of keydb + beta key
+#   bd2mkv                          # default = [1] + [2]
+#   bd2mkv rip                      # [1] only — needs disc, fetches AACS keydb + MakeMKV beta key
+#   bd2mkv encode <folder> [crf]    # [2] only — no disc, no keys; CRF default 20
+#   bd2mkv name-chapters <folder>   # [3] only — no disc, no keys; MUTATES the mkv in place
 set -euo pipefail
 
 ensure_keydb() {
@@ -47,9 +54,31 @@ cmd_rip() {
     local info name titles out
     info=$(makemkvcon -r info disc:0 2>&1)
     name=$(echo "$info" | grep -E "^DRV:0," | sed 's/.*","\([^"]*\)",".*/\1/')
-    if [ -z "$name" ] || [ "$name" = "BD_ROM" ] || [ "$name" = "DVD_ROM" ]; then
+    if [ -z "$name" ]; then
         name=$(echo "$info" | grep -E "^CINFO:2,0," | sed 's/CINFO:2,0,"//;s/"$//' || true)
     fi
+    # Prefer richer name from BDMV/META/DL/bdmt_*.xml when MakeMKV returns the
+    # generic volume label only (BD_ROM / DVD_ROM). For other labels we trust
+    # the disc's self-reported value so re-rips collide and skip.
+    case "$name" in
+        ""|BD_ROM|DVD_ROM)
+            local mnt bdmt raw
+            mnt=$(mktemp -d)
+            if mount -r /dev/sr0 "$mnt" 2>/dev/null; then
+                bdmt=$(ls "$mnt"/BDMV/META/DL/bdmt_*.xml 2>/dev/null | head -1 || true)
+                if [ -n "$bdmt" ]; then
+                    raw=$(grep -oE '<di:name>[^<]+</di:name>' "$bdmt" | head -1 \
+                          | sed 's|<[^>]*>||g' | tr -d '\n\r' || true)
+                    if [ -n "$raw" ]; then
+                        name=$(echo "$raw" | tr ' /\\:*?"<>|' '_' | tr -s '_')
+                    fi
+                fi
+                umount "$mnt" 2>/dev/null || true
+            fi
+            rmdir "$mnt" 2>/dev/null || true
+            ;;
+    esac
+    # Last-resort timestamp only when nothing was readable at all
     [ -z "$name" ] && name="disc_$(date +%Y%m%d_%H%M%S)"
 
     out="/work/output/$name"
@@ -112,6 +141,21 @@ cmd_encode() {
     echo "Done: $out"
 }
 
+cmd_fetch_lyrics() {
+    local folder="${1:?Usage: bd2mkv fetch-lyrics <encoded_folder> [artist]}"
+    local artist="${2:-}"
+    folder=$(realpath "$folder")
+    local setlist="$folder/setlist.txt"
+    local lyrics_dir="$folder/lyrics"
+    local lib="${BD2MKV_LIB:-/usr/local/lib/bd2mkv}"
+
+    [ -f "$setlist" ] || { echo "Missing: $setlist"; exit 1; }
+
+    local args=(--setlist "$setlist" --lyrics-dir "$lyrics_dir")
+    [ -n "$artist" ] && args+=(--artist "$artist")
+    python3 "$lib/fetch_lyrics.py" "${args[@]}"
+}
+
 cmd_name_chapters() {
     local folder="${1:?Usage: bd2mkv name-chapters <encoded_folder>}"
     folder=$(realpath "$folder")
@@ -124,7 +168,16 @@ cmd_name_chapters() {
 
     [ -f "$mkv" ]      || { echo "Missing: $mkv"; exit 1; }
     [ -f "$setlist" ]  || { echo "Missing: $setlist"; exit 1; }
-    [ -d "$lyrics" ]   || { echo "Missing lyrics dir: $lyrics"; exit 1; }
+
+    # auto-fetch lyrics if missing/empty (requires `# @artist NAME` in setlist.txt)
+    if [ ! -d "$lyrics" ] || [ -z "$(ls -A "$lyrics" 2>/dev/null)" ]; then
+        echo "[0/5] fetching lyrics from j-lyric"
+        python3 "$lib/fetch_lyrics.py" --setlist "$setlist" --lyrics-dir "$lyrics" || {
+            echo "lyrics fetch failed; either add lyrics manually to $lyrics or"
+            echo "add '# @artist NAME' to $setlist or run 'bd2mkv fetch-lyrics <folder> <artist>'"
+            exit 1
+        }
+    fi
 
     mkdir -p "$work/snippets" "$work/transcripts" "$WHISPER_CACHE"
 
@@ -139,7 +192,7 @@ cmd_name_chapters() {
         snippet_dur=$(awk -v d="$dur" 'BEGIN{print (d<90?d:90)}')
         out="$work/snippets/ch$(printf '%02d' $idx).mp3"
         [ -f "$out" ] && continue
-        ffmpeg -hide_banner -loglevel error \
+        ffmpeg -nostdin -hide_banner -loglevel error \
             -ss "$start" -t "$snippet_dur" -i "$mkv" \
             -vn -ac 1 -ar 16000 -b:a 64k \
             "$out"
@@ -159,7 +212,7 @@ cmd_name_chapters() {
         --transcripts "$work/transcripts" \
         --report      "$work/match_report.tsv" \
         > "$work/assignment.tsv"
-    column -t -s $'\t' "$work/match_report.tsv" | head -40
+    head -40 "$work/match_report.tsv" | column -t -s $'\t' || true
 
     echo "[5/5] applying chapter names"
     python3 "$lib/build_chapters_xml.py" \
@@ -170,21 +223,14 @@ cmd_name_chapters() {
     echo "Done: $folder/chapters.xml"
 }
 
-cmd_update_keys() {
-    rm -f "$KEYDB_CACHE" "$BETAKEY_CACHE"
-    ensure_keydb
-    ensure_betakey
-    echo "Updated."
-}
-
 cmd="${1:-all}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
     rip)            cmd_rip ;;
     encode)         cmd_encode "$@" ;;
     name-chapters)  cmd_name_chapters "$@" ;;
-    update-keys)    cmd_update_keys ;;
+    fetch-lyrics)   cmd_fetch_lyrics "$@" ;;
     all)            cmd_rip && cmd_encode ;;
-    -h|--help|help) sed -n '2,9p' "$0" | sed 's/^# \?//' ;;
+    -h|--help|help) sed -n '2,14p' "$0" | sed 's/^# \?//' ;;
     *) echo "Unknown command: $cmd"; exit 1 ;;
 esac

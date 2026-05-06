@@ -9,6 +9,9 @@ samples/
 # Project-specific working data (chapters, transcripts, setlists)
 work/
 
-# Local agent state (commit shared settings, ignore personal)
+# Local agent state (commit shared settings + skills, ignore personal)
 .claude/*
 !.claude/settings.json
+!.claude/skills/
+*.pyc
+.env
