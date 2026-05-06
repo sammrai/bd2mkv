@@ -13,7 +13,7 @@ ghcr.io/sammrai/bd2mkv encode <folder> [crf]
 ghcr.io/sammrai/bd2mkv name-chapters <folder>
 ```
 
-AACS keydb と MakeMKV beta key は実行時自動取得・キャッシュ。`./aacs/keydb.cfg` 配置で上書き可。Whisper モデルはイメージ同梱。
+AACS keydb (週次) と MakeMKV beta key (日次) は実行時自動取得・キャッシュ。`./aacs/keydb.cfg` 配置で上書き可。強制更新: `bd2mkv update-keys`。Whisper モデルはイメージ同梱。
 
 ## Plex メタデータ
 
