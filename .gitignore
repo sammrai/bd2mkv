@@ -1,0 +1,13 @@
+# AACS keys (copyrighted, large)
+aacs/
+
+# Ripping / encoding output
+output/
+encoded/
+samples/
+
+# Project-specific working data (chapters, transcripts, setlists)
+work/
+
+# Local agent state
+.claude/

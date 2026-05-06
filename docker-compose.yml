@@ -1,0 +1,16 @@
+services:
+  makemkv:
+    image: jlesage/makemkv
+    container_name: makemkv
+    ports:
+      - "5800:5800"
+    environment:
+      - MAKEMKV_KEY=BETA
+    volumes:
+      - ./output:/output:rw
+      - ./aacs/keydb.cfg:/root/.MakeMKV/KEYDB.cfg:ro
+    devices:
+      - /dev/sr0:/dev/sr0
+      - /dev/sg3:/dev/sg3
+    privileged: true
+    restart: unless-stopped
