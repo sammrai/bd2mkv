@@ -9,6 +9,30 @@ Run end-to-end without prompting. Ask only on real ambiguity (multiple LiveFans 
 
 ## Pipeline
 
+### 0. Resolve optical drive device paths and define `bd2mkv`
+
+`docker run --device` needs both the block device (`/dev/sr*`) and the SCSI generic device (`/dev/sg*`) for the same drive — these are host-dependent and must not be hardcoded. Detect them with `lsscsi -g` and pick the row whose `type` column is `cd/dvd`:
+
+```bash
+lsscsi -g
+# [7:0:0:0]    cd/dvd  HL-DT-ST BD-RE  BH16NS48      /dev/sr0   /dev/sg3
+#                                                    ^^^^^^^^   ^^^^^^^^
+#                                                    block      sg
+```
+
+Use the right two columns of that row as `--device <block> --device <sg>`. If multiple `cd/dvd` rows exist, ask which drive to use. If `lsscsi` is missing, fall back to `ls /dev/sr*` for the block device and map to `/dev/sg*` via `cat /sys/block/sr0/device/scsi_generic/sg*/uevent`, or install `lsscsi`.
+
+Then define the `bd2mkv` shell function for the rest of the pipeline (the user's shell may already alias it; verify with `type bd2mkv` and reuse if so):
+
+```bash
+bd2mkv() {
+  docker run --rm --device <BLOCK> --device <SG> --privileged \
+    -v "$(pwd):/work" ghcr.io/sammrai/bd2mkv "$@"
+}
+```
+
+Substitute `<BLOCK>` / `<SG>` with the resolved values.
+
 ### 1. Rip + encode
 
 ```bash
@@ -118,25 +142,27 @@ python3 -c "from PIL import Image; Image.open('/tmp/poster.png').convert('RGB').
 
 Embed per-song titles via `mkvpropedit` (mutates the mkv in place; Plex needs a refresh after).
 
-1. Write `encoded/<DISC>/setlist.txt` from the canonical product tracklist. **One entry per chapter mark, not per song.** First non-comment line: `# @artist NAME` (enables auto-fetch). Rules:
-   - **Medley → 1 entry** (e.g. `13th Anniversary Medley`). Listing each medley song separately desyncs the cursor and shifts every later assignment.
-   - **SE / instrumental → 1 entry** with `(SE)` suffix. Matcher skips lyric lookup on these.
-   - **Repeated songs (encore reprise) → 1 entry per occurrence**, parenthesised disambiguator on later ones (`会いに行く`, `会いに行く (アンコール)`). `lyric_path` falls back to base title.
-   - **Documentary / 御当地紀行 / behind-the-scenes** with a chapter mark → 1 entry, no lyric file (position-fill handles it).
+1. Write `encoded/<DISC>/setlist.txt` from the canonical product tracklist. **One entry per chapter mark, not per song.** First non-comment line: `# @artist NAME`. Rules:
+   - **Medley → 1 entry** (e.g. `13th Anniversary Medley`); listing each medley song separately desyncs the cursor.
+   - **SE / instrumental → 1 entry** with `(SE)` suffix.
+   - **Repeated songs (encore reprise) → 1 entry per occurrence** with a parenthesised disambiguator on later ones (`会いに行く`, `会いに行く (アンコール)`).
+   - **Documentary / 御当地紀行 / behind-the-scenes** with a chapter mark → 1 entry.
 
-2. Run `bd2mkv name-chapters encoded/<DISC>`:
-   - `[0/5]` auto-fetches lyrics from j-lyric.net (uses `# @artist`), saves `lyrics/<曲名>.txt`. Skips `(SE)` entries; reports `? not found (N): A / B / ...` for misses.
-   - `[1/5]`–`[5/5]` snippet → transcribe (faster-whisper medium → large-v3 retry) → match → `mkvpropedit`.
+2. Run `bd2mkv name-chapters encoded/<DISC>`. The CLI fetches lyrics, transcribes, matches, and writes chapter titles into the mkv.
 
-3. Spot-check `encoded/<DISC>/.chapters_cache/match_report.tsv` (the matcher dumps per-chapter score + title there). If many rows came back as `MC` when they shouldn't, the lyric file is probably wrong (different song under the same title); open the suspect file in `lyrics/`, fix or replace, then re-run (cached snippets/transcripts make `[4/5]`–`[5/5]` fast).
+3. Spot-check `encoded/<DISC>/.chapters_cache/match_report.tsv`. If many rows came back as `MC` when they shouldn't, the matched lyric file is probably wrong (a different song under the same title); fix or replace the suspect file in `lyrics/` and re-run (cached snippets/transcripts make the rerun fast).
 
 ### 7. Deploy to Plex
 
-Copy (don't move; keep `encoded/<DISC>/` for re-runs):
+Ask the user before deploying:
+
+1. Whether to deploy at all (skip if they only wanted the encoded artifacts under `encoded/<DISC>/`).
+2. The Plex library root path — this is host-specific and **must not** be hardcoded. Common locations are `/data/epgstation/movie/`, `/var/lib/plexmediaserver/...`, or a custom mount, but always confirm. Append `<DISC>/` to the chosen root for `$DST`.
+3. Copy vs. move. Default to **copy** so `encoded/<DISC>/` stays available for re-runs / cache reuse; only move if the user explicitly wants to free space.
 
 ```bash
 SRC="./encoded/<DISC>"
-DST="/data/epgstation/movie/<DISC>"
+DST="<USER_PROVIDED_LIBRARY_ROOT>/<DISC>"     # e.g. /data/epgstation/movie/<DISC>
 mkdir -p "$DST"
 cp "$SRC/<DISC>.mkv" "$SRC/<DISC>.nfo" "$SRC/poster.jpg" \
    "$SRC/setlist.txt" "$SRC/chapters.xml" "$DST/"
@@ -144,7 +170,7 @@ cp -r "$SRC/lyrics" "$DST/"
 for f in "$SRC"/*-scene.mkv; do [ -f "$f" ] && cp "$f" "$DST/"; done
 ```
 
-`.chapters_cache/` stays under `encoded/` (resume-only state). If a previous raw rip exists at `$DST` with a different filename, delete it after verifying the new encoded one plays — Plex would otherwise show duplicates.
+`.chapters_cache/` stays under `encoded/` (resume-only state). If a previous raw rip exists at `$DST` with a different filename, ask the user before deleting it (Plex would otherwise show duplicates, but they may have intentionally kept the raw alongside).
 
 ## Scope guard
 
@@ -154,5 +180,5 @@ Abort and run only `bd2mkv` (rip + encode) if the disc isn't a Japanese live con
 
 1. `<DISC>.mkv` plays, `ffprobe -show_chapters` shows song titles (not `Chapter NN`)
 2. `<DISC>.nfo` + `poster.jpg` populated alongside it
-3. Mirrored to `/data/epgstation/movie/<DISC>/`, no stale raw rip there
+3. (If deployment was requested) mirrored to the user-confirmed Plex library path, no stale raw rip there
 4. Final report links the LiveFans show / Amazon product so the user can verify in seconds
