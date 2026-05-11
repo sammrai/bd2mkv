@@ -9,7 +9,13 @@ Run end-to-end without prompting. Ask only on real ambiguity (multiple LiveFans 
 
 ## Pipeline
 
-### 0. Resolve optical drive device paths and define `bd2mkv`
+### 0. Pull latest image, resolve optical drive device paths, and define `bd2mkv`
+
+Always pull the latest image first:
+
+```bash
+docker pull ghcr.io/sammrai/bd2mkv
+```
 
 `docker run --device` needs both the block device (`/dev/sr*`) and the SCSI generic device (`/dev/sg*`) for the same drive — these are host-dependent and must not be hardcoded. Detect them with `lsscsi -g` and pick the row whose `type` column is `cd/dvd`:
 
@@ -39,6 +45,8 @@ Substitute `<BLOCK>` / `<SG>` with the resolved values.
 bd2mkv     # = rip + encode
 ```
 
+Run in the background. While it runs, proceed with §2 (parse disc name from the log as soon as it appears) and §3–§6-2 (setlist, cover art, NFO, setlist.txt, lyrics fetch) in parallel — encoding takes 1–2 hours and none of these require the MKV. Only §6-3 (`bd2mkv name-chapters`) must wait for encoding to finish.
+
 Output: `output/<DISC>/title_t*.mkv` then `encoded/<DISC>/<DISC>.mkv` (largest title) + `*-scene.mkv`.
 
 ### 2. Parse disc identity from `<DISC>`
@@ -58,7 +66,7 @@ If `<DISC>` is `BD_ROM` / `DVD_ROM` / `disc_<timestamp>`, ask the user for artis
 
 **Fallback (LiveFans)**: WebFetch `https://www.livefans.jp/` with `"<artist> <tour> セットリスト"`. Match by 公演日 == parsed date; on multi-show dates pick by 会場 / Day token.
 
-Sanity check: chapter count (`ffprobe -show_chapters`) must be **≥ setlist length** (MC/SE/interludes add chapters; 21 songs ↔ 28 chapters with 7 MCs is normal). Chapters < setlist → wrong-day match. Prefer the product-page tracklist for canonical title spellings.
+Sanity check: chapter count must be **≥ setlist length** (`ffprobe` is not on the host — use `docker run --rm -v "$(pwd):/work" --entrypoint ffprobe ghcr.io/sammrai/bd2mkv -v quiet -show_chapters /work/encoded/<DISC>/<DISC>.mkv | grep -c '\[CHAPTER\]'`) (MC/SE/interludes add chapters; 21 songs ↔ 28 chapters with 7 MCs is normal). Chapters < setlist → wrong-day match. Prefer the product-page tracklist for canonical title spellings.
 
 ### 4. Find cover art
 
@@ -148,9 +156,17 @@ Embed per-song titles via `mkvpropedit` (mutates the mkv in place; Plex needs a 
    - **Repeated songs (encore reprise) → 1 entry per occurrence** with a parenthesised disambiguator on later ones (`会いに行く`, `会いに行く (アンコール)`).
    - **Documentary / 御当地紀行 / behind-the-scenes** with a chapter mark → 1 entry.
 
-2. Run `bd2mkv name-chapters encoded/<DISC>`. The CLI fetches lyrics, transcribes, matches, and writes chapter titles into the mkv.
+2. Fetch lyrics (run while encoding is still in progress):
 
-3. Spot-check `encoded/<DISC>/.chapters_cache/match_report.tsv`. If many rows came back as `MC` when they shouldn't, the matched lyric file is probably wrong (a different song under the same title); fix or replace the suspect file in `lyrics/` and re-run (cached snippets/transcripts make the rerun fast).
+   ```bash
+   bd2mkv fetch-lyrics encoded/<DISC>
+   ```
+
+   Reads `# @artist NAME` from `setlist.txt`, looks up the artist on j-lyric.net, and saves `encoded/<DISC>/lyrics/<曲名>.txt`. Songs not found (instrumentals, interludes, MCs) are reported as `? not found` and skipped — expected. Run this explicitly so you can spot missing files before the 30-min transcription starts; `bd2mkv name-chapters` would auto-fetch too but only after encoding finishes.
+
+3. Run `bd2mkv name-chapters encoded/<DISC>`. The CLI transcribes each chapter with Whisper, matches against the lyrics, and writes chapter titles into the mkv.
+
+4. Spot-check `encoded/<DISC>/.chapters_cache/match_report.tsv`. If many rows came back as `MC` when they shouldn't, the matched lyric file is probably wrong (a different song under the same title); fix or replace the suspect file in `lyrics/` and re-run (cached snippets/transcripts make the rerun fast).
 
 ### 7. Deploy to Plex
 

@@ -37,7 +37,9 @@ ensure_betakey() {
     if [ ! -s "$BETAKEY_CACHE" ] || [ -z "$(find "$BETAKEY_CACHE" -mtime -1 2>/dev/null)" ]; then
         echo "Fetching MakeMKV beta key..."
         local key
-        key=$(curl -fsSL "https://www.makemkv.com/forum/viewtopic.php?t=1053" \
+        key=$(curl -fsSL --retry 3 --retry-delay 2 \
+            -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
+            "https://www.makemkv.com/forum/viewtopic.php?t=1053" 2>/dev/null \
             | grep -oE 'T-[a-zA-Z0-9@_-]{60,}' | head -1 || true)
         [ -n "$key" ] && echo "$key" > "$BETAKEY_CACHE"
     fi
@@ -131,7 +133,7 @@ cmd_encode() {
             continue
         fi
         echo "Encoding $fn -> $(basename "$target")"
-        ffmpeg -hide_banner -loglevel error -stats -i "$f" \
+        ffmpeg -nostdin -hide_banner -loglevel error -stats -i "$f" \
             -map 0:v -map 0:a -map 0:s? -map_chapters 0 \
             -c:v libx265 -crf "$crf" -preset medium \
             -c:a aac -b:a 320k \
