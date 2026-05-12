@@ -24,7 +24,7 @@ Algorithm:
          no lyrics to match)
 """
 from __future__ import annotations
-import argparse, csv, json, os, re
+import argparse, csv, json, os, re, sys
 
 
 SONG_THRESHOLD = 0.15           # n-gram score to count as a song anchor
@@ -155,7 +155,7 @@ def main():
     scored: list[list[tuple[float, int]]] = []
     for row in chapters:
         idx = int(row["idx"])
-        t = get_text(idx)
+        t = strip_hallucinations(get_text(idx))
         s = [(score(t, lyr), i) for i, lyr in lyrics.items()]
         s.sort(key=lambda x: (-x[0], x[1]))
         scored.append(s)
@@ -180,7 +180,8 @@ def main():
             setlist_used[cand_i] = (ch_idx, cand_score)
             break
 
-    # enforce monotonicity
+    # enforce monotonicity (collect drops for warning)
+    dropped_anchors: list[tuple[int, int, float]] = []  # (chapter_idx, setlist_pos, score)
     while True:
         items = sorted(chapter_anchor.items())
         bad = None
@@ -194,7 +195,8 @@ def main():
         if bad is None:
             break
         i = chapter_anchor.pop(bad)
-        setlist_used.pop(i, None)
+        sc_dropped = setlist_used.pop(i, (None, 0.0))[1]
+        dropped_anchors.append((bad, i, sc_dropped))
 
     # 3. precompute next-anchor song position for each chapter position
     ch_idx_in_order = [int(r["idx"]) for r in chapters]
@@ -232,6 +234,71 @@ def main():
     # 5. emit assignment + optional report
     for idx in ch_idx_in_order:
         print(f"{idx}\t{assignment[idx]}")
+
+    # 6. sanity warnings to stderr (setlist order errors / unused songs)
+    assigned_titles = {assignment[idx] for idx in ch_idx_in_order}
+    unused = [s for s in setlist if s not in assigned_titles]
+    if unused:
+        print(f"WARNING: {len(unused)} setlist song(s) NOT assigned to any chapter:",
+              file=sys.stderr)
+        for s in unused:
+            print(f"  - {s}", file=sys.stderr)
+        print("  → setlist.txt の曲順を疑ってください (LiveFans等で実演奏順を確認)。",
+              file=sys.stderr)
+
+    # consecutive MCs (3+) suggest setlist order is wrong
+    run = 0
+    runs: list[tuple[int, int]] = []  # (start_chapter_idx, length)
+    run_start = None
+    for idx in ch_idx_in_order:
+        if assignment[idx] == "MC":
+            if run == 0:
+                run_start = idx
+            run += 1
+        else:
+            if run >= 3:
+                runs.append((run_start, run))
+            run = 0
+    if run >= 3:
+        runs.append((run_start, run))
+    if runs:
+        print(f"WARNING: long MC runs detected (>=3 consecutive MCs):", file=sys.stderr)
+        for start, length in runs:
+            print(f"  - chapters {start}..{start+length-1} ({length} MCs)", file=sys.stderr)
+        print("  → 曲がMC扱いになっている可能性。setlist.txt の順序を確認。",
+              file=sys.stderr)
+
+    # high-score anchors dropped by monotonicity = strong signal setlist order is wrong
+    strong_drops = [(c, i, s) for c, i, s in dropped_anchors if s >= 0.25]
+    if strong_drops:
+        print(f"WARNING: {len(strong_drops)} high-score anchor(s) rejected by monotonicity:",
+              file=sys.stderr)
+        for ch, pos, sc in strong_drops:
+            print(f"  - chapter {ch} matched '{setlist[pos]}' (setlist#{pos+1}, score={sc:.2f})",
+                  file=sys.stderr)
+        print("  → setlist.txt の曲順が disc の実演奏順と食い違っている可能性が高い。",
+              file=sys.stderr)
+
+    # MC chapters with lyric-like content = possibly unlisted songs
+    suspicious_mc: list[tuple[int, str]] = []
+    for idx in ch_idx_in_order:
+        if assignment[idx] != "MC":
+            continue
+        text = get_text(idx)
+        cleaned = strip_hallucinations(text).strip()
+        body = re.sub(r"\s+", "", cleaned)
+        if len(body) < 50:
+            continue
+        if sum(k in cleaned for k in MC_KEYWORDS) >= 1:
+            continue
+        suspicious_mc.append((idx, body[:60]))
+    if suspicious_mc:
+        print(f"WARNING: {len(suspicious_mc)} MC chapter(s) contain lyric-like content (possibly unlisted songs):",
+              file=sys.stderr)
+        for ch, snippet in suspicious_mc:
+            print(f"  - chapter {ch}: {snippet}…", file=sys.stderr)
+        print("  → setlist.txt に未掲載の曲（インタールード/アンコール等）の可能性。追加して再実行。",
+              file=sys.stderr)
 
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:
